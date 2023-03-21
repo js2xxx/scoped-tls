@@ -69,10 +69,10 @@ macro_rules! scoped_thread_local {
         $vis static $name: $crate::ScopedKey<$ty> = {
             unsafe fn __getit() -> &'static $crate::CoreCell<*const ()> {
                 static _ASSERT_DOESNT_NEED_DROP: [(); 0] = [
-                    (); 
+                    ();
                     0 - $crate::needs_drop::<$crate::CoreCell<*const ()>>() as usize
                 ];
-                // This is safe because `Cell<*const ()>` doesn't need destructors asserted above, 
+                // This is safe because `Cell<*const ()>` doesn't need destructors asserted above,
                 // and thus we can get rid of some `registor_dtor` which is implemented in libc.
                 #[thread_local]
                 static mut FOO: $crate::CoreCell<*const ()> =
@@ -210,6 +210,41 @@ impl<T> ScopedKey<T> {
             "cannot access a scoped thread local variable without calling `set` first"
         );
         unsafe { f(&*(val as *const T)) }
+    }
+
+    /// Gets a value out of this scoped variable, if any.
+    ///
+    /// This function takes a closure which receives the value of this
+    /// variable.
+    ///
+    /// # Errors
+    ///
+    /// This function will return `None` if `set` has not previously been called.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// #[macro_use]
+    /// extern crate scoped_tls;
+    ///
+    /// scoped_thread_local!(static FOO: u32);
+    ///
+    /// # fn main() {
+    /// FOO.try_with(|slot| {
+    ///     // work with `slot`
+    /// # drop(slot);
+    /// });
+    /// # }
+    /// ```
+    pub fn try_with<F, R>(&'static self, f: F) -> Option<R>
+    where
+        F: FnOnce(&T) -> R,
+    {
+        let val = self.with_inner(|c| c.get());
+        if val.is_null() {
+            return None;
+        }
+        Some(unsafe { f(&*(val as *const T)) })
     }
 
     /// Test whether this TLS key has been `set` for the current thread.
