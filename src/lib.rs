@@ -44,20 +44,44 @@
 //! ```
 
 #![deny(missing_docs, warnings)]
+#![no_std]
+#![feature(allow_internal_unstable)]
+#![feature(thread_local)]
 
-use std::{cell::Cell, marker, thread::LocalKey};
+#[cfg(test)]
+extern crate std;
+
+use core::{cell::Cell, marker};
+
+#[doc(hidden)]
+pub use core::cell::Cell as CoreCell;
+#[doc(hidden)]
+pub use core::mem::needs_drop;
+#[doc(hidden)]
+pub use core::ptr::null as ptr_null;
 
 /// The macro. See the module level documentation for the description and examples.
 #[macro_export]
+#[allow_internal_unstable(thread_local)]
 macro_rules! scoped_thread_local {
     ($(#[$attrs:meta])* $vis:vis static $name:ident: $ty:ty) => (
         $(#[$attrs])*
-        $vis static $name: $crate::ScopedKey<$ty> = unsafe {
-            ::std::thread_local!(static FOO: ::std::cell::Cell<*const ()> = const {
-                ::std::cell::Cell::new(::std::ptr::null())
-            });
+        $vis static $name: $crate::ScopedKey<$ty> = {
+            unsafe fn __getit() -> &'static $crate::CoreCell<*const ()> {
+                static _ASSERT_DOESNT_NEED_DROP: [(); 0] = [
+                    (); 
+                    0 - $crate::needs_drop::<$crate::CoreCell<*const ()>>() as usize
+                ];
+                // This is safe because `Cell<*const ()>` doesn't need destructors asserted above, 
+                // and thus we can get rid of some `registor_dtor` which is implemented in libc.
+                #[thread_local]
+                static mut FOO: $crate::CoreCell<*const ()> =
+                    $crate::CoreCell::new($crate::ptr_null());
+                &FOO
+            }
+
             // Safety: nothing else can access FOO since it's hidden in its own scope
-            $crate::ScopedKey::new(&FOO)
+            unsafe { $crate::ScopedKey::new(__getit) }
         };
     )
 }
@@ -70,7 +94,7 @@ macro_rules! scoped_thread_local {
 /// and `with`, both of which currently use closures to control the scope of
 /// their contents.
 pub struct ScopedKey<T> {
-    inner: &'static LocalKey<Cell<*const ()>>,
+    inner: unsafe fn() -> &'static Cell<*const ()>,
     _marker: marker::PhantomData<T>,
 }
 
@@ -80,11 +104,18 @@ impl<T> ScopedKey<T> {
     #[doc(hidden)]
     /// # Safety
     /// `inner` must only be accessed through `ScopedKey`'s API
-    pub const unsafe fn new(inner: &'static LocalKey<Cell<*const ()>>) -> Self {
+    pub const unsafe fn new(inner: unsafe fn() -> &'static Cell<*const ()>) -> Self {
         Self {
             inner,
             _marker: marker::PhantomData,
         }
+    }
+
+    fn with_inner<F, R>(&'static self, f: F) -> R
+    where
+        F: FnOnce(&Cell<*const ()>) -> R,
+    {
+        unsafe { f((self.inner)()) }
     }
 
     /// Inserts a value into this scoped thread local storage slot for a
@@ -125,15 +156,15 @@ impl<T> ScopedKey<T> {
         F: FnOnce() -> R,
     {
         struct Reset {
-            key: &'static LocalKey<Cell<*const ()>>,
+            key: unsafe fn() -> &'static Cell<*const ()>,
             val: *const (),
         }
         impl Drop for Reset {
             fn drop(&mut self) {
-                self.key.with(|c| c.set(self.val));
+                unsafe { (self.key)() }.set(self.val);
             }
         }
-        let prev = self.inner.with(|c| {
+        let prev = self.with_inner(|c| {
             let prev = c.get();
             c.set(t as *const T as *const ());
             prev
@@ -173,7 +204,7 @@ impl<T> ScopedKey<T> {
     where
         F: FnOnce(&T) -> R,
     {
-        let val = self.inner.with(|c| c.get());
+        let val = self.with_inner(|c| c.get());
         assert!(
             !val.is_null(),
             "cannot access a scoped thread local variable without calling `set` first"
@@ -183,7 +214,7 @@ impl<T> ScopedKey<T> {
 
     /// Test whether this TLS key has been `set` for the current thread.
     pub fn is_set(&'static self) -> bool {
-        self.inner.with(|c| !c.get().is_null())
+        self.with_inner(|c| !c.get().is_null())
     }
 }
 
